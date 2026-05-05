@@ -65,7 +65,7 @@ class BudgetPlots:
         Parameters
         ----------
         samples : xr.Dataset
-            Output of ``mmm.allocate_budget_to_maximize_response(...)`` or
+            Output of ``sample_response_distribution(...)`` or
             equivalent.  Must contain:
 
             - ``channel_contribution_original_scale``
@@ -107,9 +107,9 @@ class BudgetPlots:
             **pc_kwargs,
         )
 
-        roas_da = (
-            samples["channel_contribution_original_scale"].sum("date")
-            / samples["allocation"]
+        n_periods = len(samples.date)
+        roas_da = samples["channel_contribution_original_scale"].sum("date") / (
+            samples["allocation"] * n_periods
         )
         roas_da.name = "roas"
 
