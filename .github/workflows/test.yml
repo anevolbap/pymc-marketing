@@ -88,6 +88,9 @@ jobs:
       # The real PR restricts this to `github.event_name == 'push'`, otherwise every
       # commit on every PR writes a fresh ~120MB entry per job.
       - name: Save pytensor compiledir
+        # Save even when tests fail: a partial cache is still worth having, and
+        # without this a single flaky test means the job caches nothing.
+        if: ${{ !cancelled() }}
         uses: actions/cache/save@v4
         with:
           path: ~/.pytensor
@@ -142,6 +145,9 @@ jobs:
                  --durations-path .test_durations
       # SPIKE: see note in the `test` job above.
       - name: Save pytensor compiledir
+        # Save even when tests fail: a partial cache is still worth having, and
+        # without this a single flaky test means the job caches nothing.
+        if: ${{ !cancelled() }}
         uses: actions/cache/save@v4
         with:
           path: ~/.pytensor
