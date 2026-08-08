@@ -65,12 +65,40 @@ jobs:
         run: |
           OLDEST=$(grep '"pymc>=' pyproject.toml | head -1 | sed 's/.*>=//' | sed 's/[",].*//')
           uv run --no-sync --frozen python -c "import pymc; assert pymc.__version__ == '${OLDEST}', pymc.__version__"
+      - name: Resolve pytensor version
+        id: ptv
+        run: |
+          echo "v=$(uv run --no-sync --frozen python -c 'import pytensor; print(pytensor.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Restore pytensor compiledir
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.pytensor
+          # The group must be in the key. All jobs of a run share github.run_id, so
+          # without it the six groups of a config collide on one entry: the first to
+          # finish saves, the other five fail to save and restore a foreign group's
+          # graphs. run_id makes each run write a fresh entry; restore-keys picks the
+          # newest previous entry for this python/linker/pytensor/group.
+          key: pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-${{ github.run_id }}
+          restore-keys: |
+            pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-
       - name: Run tests
         run: |
           uv run --no-sync --frozen pytest --splits 6 \
                  --group ${{ matrix.group }} \
                  --splitting-algorithm least_duration \
                  --durations-path .test_durations
+      # Only pushes write. A pull_request run saves into its own ref scope, which
+      # no other branch can read, so it would cost storage and help nobody. Writing
+      # on every commit would also churn the 10GB repository budget. Pull requests
+      # restore what the last push to the base branch left behind.
+      - name: Save pytensor compiledir
+        # Save even when tests fail: a partial cache is still worth having, and
+        # without this a single flaky test means the job caches nothing.
+        if: ${{ github.event_name == 'push' && !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.pytensor
+          key: pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-${{ github.run_id }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
@@ -101,6 +129,17 @@ jobs:
         run: |
           sudo apt-get install graphviz graphviz-dev
           uv pip install -e .[test]
+      - name: Resolve pytensor version
+        id: ptv
+        run: |
+          echo "v=$(uv run python -c 'import pytensor; print(pytensor.__version__)')" >> "$GITHUB_OUTPUT"
+      - name: Restore pytensor compiledir
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.pytensor
+          key: pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-${{ github.run_id }}
+          restore-keys: |
+            pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-
       - name: Run tests
         run: |
           uv run pytest --only-slow \
@@ -108,6 +147,15 @@ jobs:
                  --group ${{ matrix.group }} \
                  --splitting-algorithm least_duration \
                  --durations-path .test_durations
+      # Only pushes write: see the note in the `test` job above.
+      - name: Save pytensor compiledir
+        # Save even when tests fail: a partial cache is still worth having, and
+        # without this a single flaky test means the job caches nothing.
+        if: ${{ github.event_name == 'push' && !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.pytensor
+          key: pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-${{ github.run_id }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
