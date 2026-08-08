@@ -43,18 +43,23 @@ jobs:
                  --durations-path .test_durations_${{ matrix.linker }} \
                  --no-cov -q
         continue-on-error: true  # Record durations even if some tests fail
-      - name: Ensure newline at end of fast durations
+      # Upload each file as soon as it is recorded. The numba recording takes over
+      # an hour, so a run that dies partway still hands back what it did finish.
+      # The copy is not cosmetic: upload-artifact skips dotfiles, so the durations
+      # files have to leave the repo root under a visible name. continue-on-error
+      # keeps a failed upload from skipping the recording steps behind it.
+      - name: Stage fast durations
         run: |
           f=.test_durations_${{ matrix.linker }}
-          [ -f "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f" || true
-      # Upload each file as soon as it exists. The numba recording takes over an
-      # hour, so a run that dies partway still hands back what it did finish.
-      # Paths are listed explicitly: a leading-dot glob does not match here.
+          [ -n "$(tail -c1 "$f")" ] && echo >> "$f" || true
+          mkdir -p durations-out
+          cp "$f" durations-out/test_durations_${{ matrix.linker }}
+        continue-on-error: true
       - uses: actions/upload-artifact@v7
-        if: ${{ hashFiles(format('.test_durations_{0}', matrix.linker)) != '' }}
+        continue-on-error: true
         with:
           name: durations-fast-${{ matrix.linker }}
-          path: .test_durations_${{ matrix.linker }}
+          path: durations-out/test_durations_${{ matrix.linker }}
           if-no-files-found: error
       - name: Record slow test durations
         run: |
@@ -62,15 +67,18 @@ jobs:
                  --durations-path .test_durations_slow_${{ matrix.linker }} \
                  --no-cov -q
         continue-on-error: true
-      - name: Ensure newline at end of slow durations
+      - name: Stage slow durations
         run: |
           f=.test_durations_slow_${{ matrix.linker }}
-          [ -f "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f" || true
+          [ -n "$(tail -c1 "$f")" ] && echo >> "$f" || true
+          mkdir -p durations-out
+          cp "$f" durations-out/test_durations_slow_${{ matrix.linker }}
+        continue-on-error: true
       - uses: actions/upload-artifact@v7
-        if: ${{ hashFiles(format('.test_durations_slow_{0}', matrix.linker)) != '' }}
+        continue-on-error: true
         with:
           name: durations-slow-${{ matrix.linker }}
-          path: .test_durations_slow_${{ matrix.linker }}
+          path: durations-out/test_durations_slow_${{ matrix.linker }}
           if-no-files-found: error
 
   open_pr:
@@ -82,7 +90,14 @@ jobs:
         with:
           pattern: durations-*
           merge-multiple: true
-          path: .
+          path: durations-in
+      - name: Restore the dotfile names
+        run: |
+          for f in durations-in/test_durations_*; do
+            [ -f "$f" ] || continue
+            cp "$f" ".$(basename "$f")"
+          done
+          ls -la .test_durations_* || true
       - name: Create Pull Request
         id: cpr
         uses: peter-evans/create-pull-request@v8
