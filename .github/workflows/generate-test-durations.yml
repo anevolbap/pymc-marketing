@@ -43,22 +43,34 @@ jobs:
                  --durations-path .test_durations_${{ matrix.linker }} \
                  --no-cov -q
         continue-on-error: true  # Record durations even if some tests fail
+      - name: Ensure newline at end of fast durations
+        run: |
+          f=.test_durations_${{ matrix.linker }}
+          [ -f "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f" || true
+      # Upload each file as soon as it exists. The numba recording takes over an
+      # hour, so a run that dies partway still hands back what it did finish.
+      # Paths are listed explicitly: a leading-dot glob does not match here.
+      - uses: actions/upload-artifact@v7
+        if: ${{ hashFiles(format('.test_durations_{0}', matrix.linker)) != '' }}
+        with:
+          name: durations-fast-${{ matrix.linker }}
+          path: .test_durations_${{ matrix.linker }}
+          if-no-files-found: error
       - name: Record slow test durations
         run: |
           uv run pytest --only-slow --store-durations \
                  --durations-path .test_durations_slow_${{ matrix.linker }} \
                  --no-cov -q
         continue-on-error: true
-      - name: Ensure newline at end of durations files
+      - name: Ensure newline at end of slow durations
         run: |
-          for f in .test_durations_${{ matrix.linker }} .test_durations_slow_${{ matrix.linker }}; do
-            [ -f "$f" ] || continue
-            [ -n "$(tail -c1 "$f")" ] && echo >> "$f" || true
-          done
+          f=.test_durations_slow_${{ matrix.linker }}
+          [ -f "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f" || true
       - uses: actions/upload-artifact@v7
+        if: ${{ hashFiles(format('.test_durations_slow_{0}', matrix.linker)) != '' }}
         with:
-          name: durations-${{ matrix.linker }}
-          path: .test_durations_*${{ matrix.linker }}
+          name: durations-slow-${{ matrix.linker }}
+          path: .test_durations_slow_${{ matrix.linker }}
           if-no-files-found: error
 
   open_pr:
@@ -70,6 +82,7 @@ jobs:
         with:
           pattern: durations-*
           merge-multiple: true
+          path: .
       - name: Create Pull Request
         id: cpr
         uses: peter-evans/create-pull-request@v8
