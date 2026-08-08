@@ -828,9 +828,9 @@ class BudgetOptimizer(BaseModel):
                 "Pass an explicit response_variable to BudgetOptimizer."
             )
 
-        # 8. Compile objective & gradient
+        # 8. Objective & gradient compile on first use, not here. Constructing an
+        # optimizer to inspect it should not pay for a compile it never runs.
         self._compiled_functions = {}
-        self._compile_objective_and_grad()
 
         # 9. Build constraints
         self._constraints = {}
@@ -1134,6 +1134,12 @@ class BudgetOptimizer(BaseModel):
             "objective_and_grad": objective_and_grad_func,
         }
 
+    def _get_objective_and_grad(self):
+        """Return the compiled objective and gradient, compiling on first use."""
+        if self.utility_function not in self._compiled_functions:
+            self._compile_objective_and_grad()
+        return self._compiled_functions[self.utility_function]["objective_and_grad"]
+
     def allocate_budget(
         self,
         total_budget: float,
@@ -1281,9 +1287,7 @@ class BudgetOptimizer(BaseModel):
         def track_progress(xk):
             """Track optimization progress at each iteration."""
             # Evaluate objective and gradient
-            obj_val, grad_val = self._compiled_functions[self.utility_function][
-                "objective_and_grad"
-            ](xk)
+            obj_val, grad_val = self._get_objective_and_grad()(xk)
 
             # Store iteration info
             iter_info = {
@@ -1320,7 +1324,7 @@ class BudgetOptimizer(BaseModel):
         scipy_callback = track_progress if callback else None
 
         result = minimize(
-            fun=self._compiled_functions[self.utility_function]["objective_and_grad"],
+            fun=self._get_objective_and_grad(),
             x0=x0,
             jac=True,
             bounds=bounds,
