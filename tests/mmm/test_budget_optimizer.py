@@ -329,6 +329,26 @@ def test_budget_optimizer_clear_error_on_missing_response_variable(mmm_wrapper):
         )
 
 
+def test_objective_compiles_on_first_use(mmm_wrapper):
+    """The objective must compile in ``allocate_budget``, not at construction.
+
+    Constructing an optimizer to inspect it should not pay for a compile it
+    never runs, so ``_compiled_functions`` stays empty until the first
+    allocation.
+    """
+    optimizer = BudgetOptimizer(
+        model=mmm_wrapper,
+        num_periods=30,
+        response_variable="total_media_contribution_original_scale",
+    )
+
+    assert optimizer._compiled_functions == {}
+
+    optimizer.allocate_budget(total_budget=100)
+
+    assert optimizer.utility_function in optimizer._compiled_functions
+
+
 def test_empty_constraints_auto_adds_default(mmm_wrapper):
     """Empty ``constraints`` should auto-add the default sum constraint."""
     optimizer = BudgetOptimizer(
