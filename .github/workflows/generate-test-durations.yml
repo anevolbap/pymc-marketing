@@ -10,11 +10,19 @@ permissions:
   pull-requests: write
 
 jobs:
-  generate-durations:
+  # One durations file per (linker, selection). pytest-split has to be given a
+  # file recorded under the same selection the consuming job uses, because
+  # --only-slow skips the fast tests rather than deselecting them: they are still
+  # collected, and get stored at ~0s. A single file recorded with plain `pytest`
+  # therefore says the slow tests are free, which is what test_slow was splitting
+  # on. The two linkers need their own files as well, their profiles differ by
+  # about 1.8x in total and more per test.
+  record:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        linker: [cvm]  # Only generate once, cvm is faster
+        linker: [cvm, numba]
     env:
       PYTENSOR_FLAGS: linker=${{ matrix.linker }}
     steps:
@@ -29,14 +37,39 @@ jobs:
         run: |
           sudo apt-get install graphviz graphviz-dev
           uv pip install -e .[test]
-      - name: Run all tests with duration tracking
+      - name: Record fast test durations
         run: |
-          uv run pytest --store-durations --durations-path .test_durations -v
-        continue-on-error: true  # Generate durations even if some tests fail
-      - name: Ensure newline at end of durations file
+          uv run pytest --store-durations \
+                 --durations-path .test_durations_${{ matrix.linker }} \
+                 --no-cov -q
+        continue-on-error: true  # Record durations even if some tests fail
+      - name: Record slow test durations
         run: |
-          # Add newline if missing (pre-commit requirement)
-          [ -n "$(tail -c1 .test_durations)" ] && echo >> .test_durations || true
+          uv run pytest --only-slow --store-durations \
+                 --durations-path .test_durations_slow_${{ matrix.linker }} \
+                 --no-cov -q
+        continue-on-error: true
+      - name: Ensure newline at end of durations files
+        run: |
+          for f in .test_durations_${{ matrix.linker }} .test_durations_slow_${{ matrix.linker }}; do
+            [ -f "$f" ] || continue
+            [ -n "$(tail -c1 "$f")" ] && echo >> "$f" || true
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: durations-${{ matrix.linker }}
+          path: .test_durations_*${{ matrix.linker }}
+          if-no-files-found: error
+
+  open_pr:
+    needs: record
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: durations-*
+          merge-multiple: true
       - name: Create Pull Request
         id: cpr
         uses: peter-evans/create-pull-request@v8
@@ -46,17 +79,21 @@ jobs:
           delete-branch: true
           title: "chore: update test durations"
           add-paths: |
-            .test_durations
+            .test_durations_cvm
+            .test_durations_numba
+            .test_durations_slow_cvm
+            .test_durations_slow_numba
           body: |
             ## Automated Test Durations Update
 
-            This PR updates the `.test_durations` file with the latest test execution times from the full test suite.
+            Updates the `.test_durations_*` files that pytest-split uses to balance
+            the test groups in CI. One file per linker and per selection, because
+            the two linkers have different profiles and `--only-slow` records the
+            fast tests at ~0s.
 
             **Details:**
             - 🤖 Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             - 📅 Trigger: ${{ github.event_name == 'schedule' && 'Scheduled (weekly)' || format('Manual trigger by @{0}', github.actor) }}
-
-            **Note:** This is an automated update. The file will be used by pytest-split to balance test groups in CI.
           labels: |
             no releasenotes
             maintenance
