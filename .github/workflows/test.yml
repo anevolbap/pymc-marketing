@@ -73,11 +73,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.pytensor
-          # Exact key never matches (run_id is unique), so this always falls back to
-          # restore-keys and picks up the most recent entry for this python/linker/pytensor.
-          key: pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-${{ github.run_id }}
+          # The group must be in the key. All jobs of a run share github.run_id, so
+          # without it the six groups of a config collide on one entry: the first to
+          # finish saves, the other five fail to save and restore a foreign group's
+          # graphs. run_id makes each run write a fresh entry; restore-keys picks the
+          # newest previous entry for this python/linker/pytensor/group.
+          key: pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-${{ github.run_id }}
           restore-keys: |
-            pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-
+            pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-
       - name: Run tests
         run: |
           uv run --no-sync --frozen pytest --splits 6 \
@@ -86,7 +89,7 @@ jobs:
                  --durations-path .test_durations
       # SPIKE: saves on every event so run 2 of this branch can read what run 1 wrote.
       # The real PR restricts this to `github.event_name == 'push'`, otherwise every
-      # commit on every PR writes a fresh ~120MB entry per job.
+      # commit on every PR writes a fresh entry per job.
       - name: Save pytensor compiledir
         # Save even when tests fail: a partial cache is still worth having, and
         # without this a single flaky test means the job caches nothing.
@@ -94,7 +97,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.pytensor
-          key: pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-${{ github.run_id }}
+          key: pytensor-${{ runner.os }}-py${{ matrix.config.python-version }}-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-${{ github.run_id }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
@@ -133,9 +136,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.pytensor
-          key: pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-${{ github.run_id }}
+          key: pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-${{ github.run_id }}
           restore-keys: |
-            pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-
+            pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-
       - name: Run tests
         run: |
           uv run pytest --only-slow \
@@ -151,7 +154,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.pytensor
-          key: pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-${{ github.run_id }}
+          key: pytensor-slow-${{ runner.os }}-py3.13-${{ matrix.linker }}-pt${{ steps.ptv.outputs.v }}-g${{ matrix.group }}-${{ github.run_id }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
