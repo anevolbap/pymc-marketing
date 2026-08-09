@@ -1,0 +1,145 @@
+name: Record numba durations
+
+# Records per-test numba timings, which nothing has ever measured: the numba
+# jobs are the ceiling on time to green in every configuration measured so far,
+# and #2249 asks where that time goes.
+#
+# Recording the whole suite in one job does not work here, it gets cancelled at
+# about 63 minutes. So the fast pass is sharded six ways. Each shard writes only
+# the tests it ran, thanks to --clean-durations, so the six files union with no
+# stale entries. .test_durations is only a seed to spread the shards roughly
+# evenly; whatever it says about individual tests is discarded on write.
+#
+# The slow pass runs in its own job. It is about 35 minutes on its own, and it
+# only failed before because it sat behind the fast pass in the same job.
+
+on:
+  push:
+    branches: [measure/numba-durations]
+  workflow_dispatch:
+
+env:
+  PYTENSOR_FLAGS: linker=numba
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    name: fast (${{ matrix.group }}/6)
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+      - name: Set up Python
+        run: uv python install 3.13
+      - name: Set up environment
+        run: uv venv --python 3.13
+      - name: Install package and dependencies
+        run: |
+          sudo apt-get install graphviz graphviz-dev
+          uv pip install -e .[test]
+      - name: Fingerprint the seed
+        run: sha256sum .test_durations | cut -d' ' -f1 > seed.sha
+      - name: Record
+        run: |
+          uv run --no-sync --frozen pytest \
+                 --splits 6 --group ${{ matrix.group }} \
+                 --splitting-algorithm least_duration \
+                 --store-durations --clean-durations \
+                 --durations-path .test_durations \
+                 --no-cov -q
+        continue-on-error: true
+      # If the recording is cancelled, pytest-split never writes and the seed
+      # file is still sitting there. Copying it would smuggle cvm timings into
+      # the numba merge, so refuse to ship a file that did not change.
+      - name: Stage
+        run: |
+          mkdir -p out
+          if [ "$(sha256sum .test_durations | cut -d' ' -f1)" = "$(cat seed.sha)" ]; then
+            echo "::warning::shard ${{ matrix.group }} did not write durations, shipping empty"
+            echo '{}' > out/fast-${{ matrix.group }}.json
+          else
+            cp .test_durations out/fast-${{ matrix.group }}.json
+          fi
+          python3 -c "import json;print('entries', len(json.load(open('out/fast-${{ matrix.group }}.json'))))"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: numba-fast-${{ matrix.group }}
+          path: out/fast-${{ matrix.group }}.json
+          if-no-files-found: error
+
+  slow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+      - name: Set up Python
+        run: uv python install 3.13
+      - name: Set up environment
+        run: uv venv --python 3.13
+      - name: Install package and dependencies
+        run: |
+          sudo apt-get install graphviz graphviz-dev
+          uv pip install -e .[test]
+      - name: Record
+        run: |
+          uv run --no-sync --frozen pytest --only-slow \
+                 --store-durations --clean-durations \
+                 --durations-path .test_durations_slow_numba \
+                 --no-cov -q
+        continue-on-error: true
+      - name: Stage
+        run: |
+          mkdir -p out
+          cp .test_durations_slow_numba out/slow.json
+          python3 -c "import json;print('entries', len(json.load(open('out/slow.json'))))"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: numba-slow
+          path: out/slow.json
+          if-no-files-found: error
+
+  merge:
+    needs: [fast, slow]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: numba-*
+          merge-multiple: true
+          path: shards
+      - name: Merge the shards
+        run: |
+          python3 - <<'PY'
+          import glob, json
+          fast = {}
+          for path in sorted(glob.glob("shards/fast-*.json")):
+              part = json.load(open(path))
+              overlap = set(part) & set(fast)
+              print(f"{path}: {len(part)} entries, {len(overlap)} overlapping")
+              fast.update(part)
+          json.dump(fast, open(".test_durations_numba", "w"), indent=2, sort_keys=True)
+          print(f"merged fast: {len(fast)} entries, {sum(fast.values()):.0f}s")
+          try:
+              slow = json.load(open("shards/slow.json"))
+              json.dump(slow, open(".test_durations_slow_numba", "w"), indent=2, sort_keys=True)
+              print(f"slow: {len(slow)} entries, {sum(slow.values()):.0f}s")
+          except FileNotFoundError:
+              print("slow shard missing")
+          PY
+      - name: Stage merged
+        run: |
+          mkdir -p merged
+          cp .test_durations_numba merged/test_durations_numba || true
+          cp .test_durations_slow_numba merged/test_durations_slow_numba || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: numba-durations-merged
+          path: merged/
+          if-no-files-found: error
