@@ -1,5 +1,22 @@
 name: Generate Test Durations
 
+# Records the four durations files pytest-split uses to balance CI: one per
+# linker, per selection.
+#
+# Per selection because --only-slow in tests/conftest.py marks the fast tests as
+# skipped rather than deselecting them. They stay in the list pytest-split
+# partitions, so a file recorded with plain pytest stores every slow test at
+# roughly zero and the test_slow groups end up split by test count.
+#
+# Per linker because the profiles differ: numba is about 1.9x slower on the fast
+# tests and faster on the slow ones, and the ratio runs from 1.6x to 6.7x per
+# file, so a cvm-recorded file misbalances the numba groups.
+#
+# Both passes are sharded. Recording a whole pass in one job does not finish, it
+# gets cancelled at around 63 minutes. --clean-durations makes each shard write
+# only the tests it ran, and pytest-split deselects rather than skips, so the
+# shards partition the suite and merge with no stale entries.
+
 on:
   workflow_dispatch:  # Manual trigger
   schedule:
@@ -10,13 +27,17 @@ permissions:
   pull-requests: write
 
 jobs:
-  generate-durations:
+  fast:
     runs-on: ubuntu-latest
+    name: fast ${{ matrix.linker }} (${{ matrix.group }}/6)
     strategy:
+      fail-fast: false
       matrix:
-        linker: [cvm]  # Only generate once, cvm is faster
+        linker: [cvm, numba]
+        group: [1, 2, 3, 4, 5, 6]
     env:
       PYTENSOR_FLAGS: linker=${{ matrix.linker }}
+      DUR: .test_durations_${{ matrix.linker }}
     steps:
       - uses: actions/checkout@v7
       - name: Install uv
@@ -29,14 +50,122 @@ jobs:
         run: |
           sudo apt-get install graphviz graphviz-dev
           uv pip install -e .[test]
-      - name: Run all tests with duration tracking
+      - name: Fingerprint the previous file
+        run: sha256sum "$DUR" | cut -d' ' -f1 > seed.sha
+      - name: Record
         run: |
-          uv run pytest --store-durations --durations-path .test_durations -v
-        continue-on-error: true  # Generate durations even if some tests fail
-      - name: Ensure newline at end of durations file
+          uv run --no-sync --frozen pytest \
+                 --splits 6 --group ${{ matrix.group }} \
+                 --splitting-algorithm least_duration \
+                 --store-durations --clean-durations \
+                 --durations-path "$DUR" \
+                 --no-cov -q
+        continue-on-error: true  # record durations even if some tests fail
+      # A cancelled shard never reaches sessionfinish, so last week's file is
+      # still on disk. Copying it would pass old timings off as fresh, so send an
+      # empty object and let the merge step drop the whole pass.
+      - name: Stage
         run: |
-          # Add newline if missing (pre-commit requirement)
-          [ -n "$(tail -c1 .test_durations)" ] && echo >> .test_durations || true
+          mkdir -p out
+          if [ "$(sha256sum "$DUR" | cut -d' ' -f1)" = "$(cat seed.sha)" ]; then
+            echo "::warning::fast ${{ matrix.linker }} ${{ matrix.group }} recorded nothing"
+            echo '{}' > out/fast-${{ matrix.linker }}-${{ matrix.group }}.json
+          else
+            cp "$DUR" out/fast-${{ matrix.linker }}-${{ matrix.group }}.json
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dur-fast-${{ matrix.linker }}-${{ matrix.group }}
+          path: out/fast-${{ matrix.linker }}-${{ matrix.group }}.json
+          if-no-files-found: error
+
+  slow:
+    runs-on: ubuntu-latest
+    name: slow ${{ matrix.linker }} (${{ matrix.group }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        linker: [cvm, numba]
+        group: [1, 2]
+    env:
+      PYTENSOR_FLAGS: linker=${{ matrix.linker }}
+      DUR: .test_durations_slow_${{ matrix.linker }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+      - name: Set up Python
+        run: uv python install 3.13
+      - name: Set up environment
+        run: uv venv --python 3.13
+      - name: Install dependencies
+        run: |
+          sudo apt-get install graphviz graphviz-dev
+          uv pip install -e .[test]
+      - name: Fingerprint the previous file
+        run: sha256sum "$DUR" | cut -d' ' -f1 > seed.sha
+      - name: Record
+        run: |
+          uv run --no-sync --frozen pytest --only-slow \
+                 --splits 2 --group ${{ matrix.group }} \
+                 --splitting-algorithm least_duration \
+                 --store-durations --clean-durations \
+                 --durations-path "$DUR" \
+                 --no-cov -q
+        continue-on-error: true
+      - name: Stage
+        run: |
+          mkdir -p out
+          if [ "$(sha256sum "$DUR" | cut -d' ' -f1)" = "$(cat seed.sha)" ]; then
+            echo "::warning::slow ${{ matrix.linker }} ${{ matrix.group }} recorded nothing"
+            echo '{}' > out/slow-${{ matrix.linker }}-${{ matrix.group }}.json
+          else
+            cp "$DUR" out/slow-${{ matrix.linker }}-${{ matrix.group }}.json
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dur-slow-${{ matrix.linker }}-${{ matrix.group }}
+          path: out/slow-${{ matrix.linker }}-${{ matrix.group }}.json
+          if-no-files-found: error
+
+  open_pr:
+    needs: [fast, slow]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dur-*
+          merge-multiple: true
+          path: shards
+      # A pass missing a shard would land a file without those tests, which reads
+      # as "they are free" and misbalances the groups. Keep the previous file.
+      - name: Merge the shards
+        run: |
+          python3 - <<'PY'
+          import glob, json
+
+          for pas, want in (("fast", 6), ("slow", 2)):
+              for linker in ("cvm", "numba"):
+                  paths = sorted(glob.glob(f"shards/{pas}-{linker}-*.json"))
+                  parts = [json.load(open(p)) for p in paths]
+                  empty = sum(1 for p in parts if not p)
+                  if len(parts) != want or empty:
+                      print(f"{pas} {linker}: {len(parts)}/{want} shards, {empty} empty, "
+                            f"keeping the previous file")
+                      continue
+                  merged = {}
+                  for part in parts:
+                      merged.update(part)
+                  name = (f".test_durations_{linker}" if pas == "fast"
+                          else f".test_durations_slow_{linker}")
+                  with open(name, "w") as fh:
+                      json.dump(merged, fh, indent=4, sort_keys=True)
+                      fh.write("\n")  # pre-commit wants the trailing newline
+                  print(f"{pas} {linker}: {len(merged)} entries, "
+                        f"{sum(merged.values()):.0f}s -> {name}")
+          PY
       - name: Create Pull Request
         id: cpr
         uses: peter-evans/create-pull-request@v8
@@ -46,17 +175,26 @@ jobs:
           delete-branch: true
           title: "chore: update test durations"
           add-paths: |
-            .test_durations
+            .test_durations_cvm
+            .test_durations_numba
+            .test_durations_slow_cvm
+            .test_durations_slow_numba
           body: |
             ## Automated Test Durations Update
 
-            This PR updates the `.test_durations` file with the latest test execution times from the full test suite.
+            Updates the `.test_durations_*` files that pytest-split uses to balance
+            the test groups in CI. One file per linker and per selection, because
+            the two linkers have different profiles and `--only-slow` records the
+            fast tests at roughly zero.
+
+            A pass whose shards did not all report keeps its previous file rather
+            than landing a partial one.
 
             **Details:**
             - 🤖 Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             - 📅 Trigger: ${{ github.event_name == 'schedule' && 'Scheduled (weekly)' || format('Manual trigger by @{0}', github.actor) }}
 
-            **Note:** This is an automated update. The file will be used by pytest-split to balance test groups in CI.
+            **Note:** This is an automated update. The files are used by pytest-split to balance test groups in CI.
           labels: |
             no releasenotes
             maintenance

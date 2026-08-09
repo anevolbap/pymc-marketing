@@ -65,13 +65,17 @@ jobs:
         run: |
           OLDEST=$(grep '"pymc>=' pyproject.toml | head -1 | sed 's/.*>=//' | sed 's/[",].*//')
           uv run --no-sync --frozen python -c "import pymc; assert pymc.__version__ == '${OLDEST}', pymc.__version__"
+      # Coverage runs on the cvm cells only. Both linkers execute the same Python
+      # lines, so the numba cells add about 1.3x runtime for no extra signal.
       - name: Run tests
         run: |
           uv run --no-sync --frozen pytest --splits 6 \
                  --group ${{ matrix.group }} \
                  --splitting-algorithm least_duration \
-                 --durations-path .test_durations
+                 --durations-path .test_durations_${{ matrix.linker }} \
+                 ${{ matrix.linker == 'numba' && '--no-cov' || '' }}
       - name: Upload coverage to Codecov
+        if: ${{ matrix.linker == 'cvm' }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }} # use token for more robust uploads
@@ -86,7 +90,9 @@ jobs:
       fail-fast: false
       matrix:
         linker: [cvm, numba]
-        group: [1, 2]  # Reduced from 3 to 2 groups for better balance
+        # The slowest test_slow job sets the wall clock for the whole workflow,
+        # and job setup costs about 70s, so more splits is a good trade here.
+        group: [1, 2, 3, 4]
     env:
       PYTENSOR_FLAGS: linker=${{ matrix.linker }}
     steps:
@@ -104,11 +110,13 @@ jobs:
       - name: Run tests
         run: |
           uv run pytest --only-slow \
-                 --splits 2 \
+                 --splits 4 \
                  --group ${{ matrix.group }} \
                  --splitting-algorithm least_duration \
-                 --durations-path .test_durations
+                 --durations-path .test_durations_slow_${{ matrix.linker }} \
+                 ${{ matrix.linker == 'numba' && '--no-cov' || '' }}
       - name: Upload coverage to Codecov
+        if: ${{ matrix.linker == 'cvm' }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }} # use token for more robust uploads
