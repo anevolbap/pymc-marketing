@@ -59,7 +59,7 @@ jobs:
                  --splitting-algorithm least_duration \
                  --store-durations --clean-durations \
                  --durations-path "$DUR" \
-                 --no-cov -q
+                 ${{ matrix.linker == 'numba' && '--no-cov' || '' }} -q
         continue-on-error: true
       # A cancelled recording leaves the seed untouched, and copying it would
       # smuggle the old timings into the merge. Refuse to ship an unchanged file.
@@ -116,7 +116,7 @@ jobs:
                  --splitting-algorithm least_duration \
                  --store-durations --clean-durations \
                  --durations-path "$DUR" \
-                 --no-cov -q
+                 ${{ matrix.linker == 'numba' && '--no-cov' || '' }} -q
         continue-on-error: true
       - name: Stage
         run: |
