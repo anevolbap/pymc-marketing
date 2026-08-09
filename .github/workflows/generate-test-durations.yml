@@ -16,6 +16,11 @@ name: Generate Test Durations
 # gets cancelled at around 63 minutes. --clean-durations makes each shard write
 # only the tests it ran, and pytest-split deselects rather than skips, so the
 # shards partition the suite and merge with no stale entries.
+#
+# Coverage is set the same way test.yml sets it, on for cvm and off for numba,
+# because a duration is only useful if it was recorded under the conditions it
+# will be consumed under. Recording cvm with --no-cov and running it with
+# coverage understates the slow tests unevenly and misbalances the groups.
 
 on:
   workflow_dispatch:  # Manual trigger
@@ -59,7 +64,7 @@ jobs:
                  --splitting-algorithm least_duration \
                  --store-durations --clean-durations \
                  --durations-path "$DUR" \
-                 --no-cov -q
+                 ${{ matrix.linker == 'numba' && '--no-cov' || '' }} -q
         continue-on-error: true  # record durations even if some tests fail
       # A cancelled shard never reaches sessionfinish, so last week's file is
       # still on disk. Copying it would pass old timings off as fresh, so send an
@@ -111,7 +116,7 @@ jobs:
                  --splitting-algorithm least_duration \
                  --store-durations --clean-durations \
                  --durations-path "$DUR" \
-                 --no-cov -q
+                 ${{ matrix.linker == 'numba' && '--no-cov' || '' }} -q
         continue-on-error: true
       - name: Stage
         run: |
