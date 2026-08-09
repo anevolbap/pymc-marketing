@@ -1,0 +1,80 @@
+name: Measure slow split
+
+# Isolates one variable at a time in the test_slow split.
+#
+# Four arms, crossed: --splits 2 or 4, times the durations file recorded with
+# plain pytest (.test_durations, what main uses today) or one recorded with
+# --only-slow (.test_durations_slow_cvm). All arms run in the same workflow run
+# so they share the runner pool and the time of day, which is the only way to
+# compare them: single jobs on this fork have been seen to vary by 2.8x.
+#
+# cvm only and --no-cov everywhere, so linker and coverage cannot confound the
+# split effect. Primary metric is the `Run tests` step duration; the step is
+# named exactly that so the analysis script can find it.
+
+on:
+  push:
+    branches: ["measure/**"]
+  workflow_dispatch:
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    name: m (${{ matrix.arm }}, ${{ matrix.group }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arm: old2, splits: 2, group: 1, dur: .test_durations}
+          - {arm: old2, splits: 2, group: 2, dur: .test_durations}
+          - {arm: new2, splits: 2, group: 1, dur: .test_durations_slow_cvm}
+          - {arm: new2, splits: 2, group: 2, dur: .test_durations_slow_cvm}
+          - {arm: old4, splits: 4, group: 1, dur: .test_durations}
+          - {arm: old4, splits: 4, group: 2, dur: .test_durations}
+          - {arm: old4, splits: 4, group: 3, dur: .test_durations}
+          - {arm: old4, splits: 4, group: 4, dur: .test_durations}
+          - {arm: new4, splits: 4, group: 1, dur: .test_durations_slow_cvm}
+          - {arm: new4, splits: 4, group: 2, dur: .test_durations_slow_cvm}
+          - {arm: new4, splits: 4, group: 3, dur: .test_durations_slow_cvm}
+          - {arm: new4, splits: 4, group: 4, dur: .test_durations_slow_cvm}
+    env:
+      PYTENSOR_FLAGS: linker=cvm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.3.2
+      - name: Set up Python
+        run: uv python install 3.13
+      - name: Set up environment
+        run: uv venv --python 3.13
+      - name: Install package and dependencies
+        run: |
+          sudo apt-get install graphviz graphviz-dev
+          uv pip install -e .[test]
+      - name: Record the assignment
+        run: |
+          uv run --no-sync --frozen pytest --only-slow --collect-only -q \
+                 --splits ${{ matrix.splits }} \
+                 --group ${{ matrix.group }} \
+                 --splitting-algorithm least_duration \
+                 --durations-path ${{ matrix.dur }} \
+                 --no-cov 2>&1 | grep '::' | sort > assignment.txt
+          echo "tests assigned: $(wc -l < assignment.txt)"
+      - name: Run tests
+        run: |
+          uv run --no-sync --frozen pytest --only-slow \
+                 --splits ${{ matrix.splits }} \
+                 --group ${{ matrix.group }} \
+                 --splitting-algorithm least_duration \
+                 --durations-path ${{ matrix.dur }} \
+                 --no-cov -q
+        continue-on-error: true
+      - name: Stage the assignment
+        run: |
+          mkdir -p out
+          cp assignment.txt out/assignment-${{ matrix.arm }}-${{ matrix.group }}.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: assignment-${{ matrix.arm }}-${{ matrix.group }}
+          path: out/assignment-${{ matrix.arm }}-${{ matrix.group }}.txt
+          if-no-files-found: error
